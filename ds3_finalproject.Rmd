@@ -1,0 +1,416 @@
+---
+title: "Data Science 3 - Unstructured Text Analysis"
+author: "Haaris Afzal Cheema"
+output:
+  prettydoc::html_pretty:
+    theme: hpstr
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(rtweet)
+library(tidyverse)
+library(tidytext)
+library(textstem)
+library(RColorBrewer)
+library(wordcloud)
+library(textdata)
+library(forcats)
+library(sentimentr)
+library(igraph)
+library(ggraph)
+library(tm)
+library(ldatuning)
+library(topicmodels)
+library(tm)
+library(kableExtra)
+```
+
+## Introduction
+
+This article aims at analyzing twitter data regarding the Roe v Wade case. Since many years, there has been a strong divide amongst people in the US regarding the abortion laws. In January 1973, a ruling was passed by the Supreme Court that existing laws infringed upon a woman's right to privacy and so after balancing the government's public health interests in protecting women's health and prenatal life, abortions were legalized during the first trimester and also the second trimester in some cases. However, on May 2, 2022, a leaked initial draft regarding an ongoing case has shown that the Supreme Court is prepared to overturn the Roe v Wade case. There has been significant outcry regarding this leaked draft by those having a pro-choice stance. On the contrary, this news is also being celebrated by those having a pro-life stance. The aim of this analysis will therefore be to analyze these tweets at a deep level using various NLP techniques and to gauge what sentiment seems to be dominant in these tweets.
+
+## Hypothesis
+
+The expectation, prior to conducting this analysis, is that because the right to an abortion which was previously granted, is being taken away yet again, there will be far greater negative sentiment as opposed to positive sentiment in these tweets.
+
+## Twitter Authentication
+
+Firstly, a developer Twitter account is needed to access this data from the **rtweets** package. Once that is created, a new app needs to be created and then the consumer key, consumer secret, access token and access secret can be obtained. Once that is done, elevated access needs to be requested. This is almost instantly granted after necessary information is provided.
+
+As can be seen, the credentials have been hidden and that the actual keys and secrets need to be placed within the quotation marks.
+
+```{r,eval=FALSE}
+app <- "app"
+consumer_key <- "consumerkey"
+consumer_secret <- "consumersecret"
+access_token <- "accesstoken"
+access_secret <- "accesssecret"
+
+token <- create_token(
+  app = app,
+  consumer_key = consumer_key,
+  consumer_secret = consumer_secret,
+  access_token = access_token,
+  access_secret = access_secret)
+
+```
+
+## Loading the data
+
+Now that the token has successfully been generated, the tweets can be extracted. To ensure that we are dealing with the same set of tweets, this obtained data is exported to a csv which is then uploaded to a public gitHub repository.
+
+```{r, eval=FALSE}
+# Extracting the tweets and exporting to csv #
+
+tweets <- search_tweets(q = "#RoeVWade",
+                        n = 3200, token = token)
+
+rtweet::write_as_csv(tweets, "tweets.csv", prepend_ids = TRUE, na = "", fileEncoding = "UTF-8")
+
+```
+
+The uploaded csv is then read directly from github into R. This is done primarily to avoid any issues pertaining to reproducibility of this analysis.
+
+```{r}
+# Reading the csv
+
+tweets <- read.csv(url("https://raw.githubusercontent.com/CheemaHaaris/DS3/main/tweets.csv"))
+```
+
+## Data Cleaning and Text Processing
+
+Next, we move on to the data cleaning phase. The loaded data had around 90 columns, most of which had a lot of missing data. This analysis was restricted to a few columns which might come in handy and the rest were gotten rid of. It is important to note at this point that retweets were included in this analysis. While this does bring in some repetition, the assumption is that it does reflect what each retweeter thinks and wants to communicate about this issue.
+
+As expected, the text of the tweets was pretty messy and a lot of cleaning was required. Therefore to bring the text to a normalized and more insightful form, several steps were taken. The tweets were converted to lower case. Mentions, urls, emojis, numbers and punctuations were gotten rid of. Spaces and newlines were also dealt with.
+
+```{r, message=FALSE,warning=FALSE}
+data <- tweets[,c(3,4,5,6)]
+
+# Saving the text column as a variable
+text <- data$text
+
+# Set the text to lowercase
+text <- tolower(text)
+
+# Removing mentions, urls, emojis, numbers, punctuations, etc.
+text <- gsub("@\\w+", "", text)
+text <- gsub("https?://.+", "", text)
+text <- gsub("\\d+\\w*\\d*", "", text)
+text <- gsub("#\\w+", "", text)
+text <- gsub("[^\x01-\x7F]", "", text)
+text <- gsub("[[:punct:]]", " ", text)
+
+# Removing spaces and newlines
+text <- gsub("\n", " ", text)
+text <- gsub("^\\s+", "", text)
+text <- gsub("\\s+$", "", text)
+text <- gsub("[ |\t]+", " ", text)
+
+# Putting the data to a new column
+data["fixed_text"] <- text
+
+```
+
+From the original dataframe, a column for sentiment was created as this would aid in later stages of this analysis. This sentiment was generated using the **sentimentr** package, which classified each sentence as positive or negative.
+
+```{r, message=FALSE, warning=FALSE}
+data$sentiment <- round(sentiment(data$fixed_text),3)
+
+data$class <- ifelse(data$sentiment$sentiment > 0, "positive", "negative")
+```
+
+Next, tokenizing of the tweets was done as the subsequent analysis would be done at a word level. Stopwords were removed from these unnested tokens, and the remaining ones were lemmatized to remove the inflectional endings. Lastly, words lesser than three characters were also removed.
+
+```{r, message=FALSE, warning=FALSE}
+# unnesting text - tokenizing
+words <- data %>% select(fixed_text) %>%
+  unnest_tokens(word, fixed_text)
+
+# removing stopwords
+data("stop_words")
+
+words <- words %>%
+  anti_join(stop_words, by = "word")
+
+# lemmatizing the words - converting to root word
+words <- lemmatize_words(words)
+
+#retaining words with length > 2
+
+words <- words %>%
+  filter(length(word) >2)
+```
+
+## Exploratory Data Analysis
+
+Now that the data cleaning and text processing is complete, we can do some exploratory analysis. A term frequency plot regarding the 10 most occuring words can be seen below.
+
+```{r, fig.align='center', fig.width= 7, fig.height= 5}
+# Term Frequency Plot #
+
+df <- words %>% group_by(word) %>% count() %>% arrange(, -n) 
+
+ggplot( df %>% head(n=10), aes( x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", col = "black", fill = "red3")+
+    coord_flip() + theme_bw() +
+      labs(title = "Term Frequency Plot",
+           x = "Frequency",
+           y = "Top 10 words")
+```
+
+While the first few terms were expected, we can gain some insight regarding the common words in these tweets. For instance, words like domestic, violence and rape tend to recur in these texts. Another approach to look at the common words is to analyze the word cloud.
+
+```{r, message=FALSE, warning=FALSE,fig.align='center', fig.width= 7, fig.height= 5}
+# Wordcloud #
+
+set.seed(1234)
+wordcloud(words = df$word, freq = df$n, min.freq = 100,
+          max.words=600, random.order=FALSE, rot.per=0.35, 
+          color = "red3")
+```
+
+Words like racism, mad and violence again tend to show the sheer negativity contained within these tweets. The word cloud also mentions Donald Trump who openly opposed the RoeVWade decision.
+
+## Sentiment Analysis
+
+To delve deeper into our data, we perform a sentiment analysis using the NRC Word-Emotion Association Lexicon. Each word is classified into one out of eight categories of emotions. It is important to note that each word can have more than one emotion associated with it.
+
+```{r, message=FALSE, warning=FALSE, fig.align='center', fig.width= 7, fig.height= 5}
+sent <- get_sentiments("nrc")
+
+x <- df %>% inner_join(sent)
+
+x <- aggregate(x$n, by=list(sentiment=x$sentiment), FUN=sum)
+
+ggplot(x, aes(x = sentiment, y = x)) + 
+  geom_bar(stat = "identity", col = "black", fill = "red3") +
+    geom_text(aes(label=x), position=position_dodge(width=0.9), vjust=-0.25)+
+      theme_bw() +
+        labs(x = "Sentiment", y = "Frequency Score", title = "Sentiment Distribution")
+```
+
+The sentiment analysis interestingly goes against the intial hypothesis. We can see that while there is a significant amount of negative words, there is also a large number of positive words. Similarly, while emotions such as fear, sadness and anger tend to be widespread, words associated with the trust emotion are also very common. However, if we classify these eight emotions into two categories of positive and negative, we would still expect to have more negativity than positivity.
+
+## Tf-Idf
+
+Next, a tf-idf model was fitted to the text. This was done to determine how relevant each word is in a document. For this part, as you may recall, a variable was created which classified the each tweet as negative or positive (using sentimentr). This was done to analyze relevant words in the positive tweets as well as the negative ones.
+
+```{r,message=FALSE,warning=FALSE, fig.align='center', fig.width= 7, fig.height= 5}
+
+class_words <- data %>%
+  unnest_tokens(word, fixed_text) %>%
+  count(class, word, sort = TRUE)
+
+total_words <- class_words %>% group_by(class) %>% summarize(total = sum(n))
+class_words <- left_join(class_words, total_words)
+
+ggplot(class_words, aes(n/total, fill = class)) +
+  geom_histogram(show.legend = FALSE, col = "black") +
+  xlim(NA, 0.0009) +
+  facet_wrap(~ class, ncol = 2, scales = "free_y") + theme_bw()+
+  labs(x = "Term Frequency (N / Total)", y = "Count") +
+  scale_fill_manual(values = c("red3", "royalblue3")) + 
+  theme(legend.position = "none",
+        strip.background = element_rect(colour="black",
+                                        fill="white"))
+```
+We can observe long tails to the right for both classes of tweets. There are a few words that occur very frequently and then there are a lot more words which occur less frequently.
+
+```{r, fig.align='center', fig.width= 7, fig.height= 5, out.height=5, out.width=7}
+class_words <- class_words %>% bind_tf_idf(word, class, n)
+
+class_words %>%
+  select(-total) %>%
+  arrange(desc(tf_idf)) %>% head(n=10) %>% 
+  kbl() %>%
+  kable_classic_2(full_width = F)
+```
+
+Based on the outputs shown above, we can see that among the negatively classified tweets, words such as empowered, donald and racist seem to be the most relevant and important. Similarly, for the positively classified tweets, we can see Jane come up frequently, which was expected as it was her case which led to the Supreme Court granting abortion rights in the first place. We also see some words we identical tf idf scores. This is because these were part of tweets which were retweeted, but not a lot, and yet were important and relevant in their class (positive or negative) of tweets. The words with the highest tf-idf scores in the positively classified tweets seem to be more of a generic nature.
+
+
+```{r, message=FALSE, warning=FALSE,fig.align='center', fig.width= 7, fig.height= 5}
+class_words %>%
+  group_by(class) %>%
+  slice_max(tf_idf, n = 10) %>%
+  ungroup() %>%
+  ggplot(aes(tf_idf, fct_reorder(word, tf_idf), fill = class)) +
+  geom_col(show.legend = FALSE, col = "black") +
+  facet_wrap(~class, ncol = 2, scales = "free") +
+  labs(x = "tf-idf", y = NULL) + theme_bw() +
+  scale_fill_manual(values = c("red3", "royalblue3")) +
+  theme(legend.position = "none",
+        strip.background = element_rect(colour="black",
+                                        fill="white"))
+
+```
+In the visual below, we re-evaluate the terms with the highest tf-idf, but in this case the retweets were removed. We can see that the tf-idf scores decrease and the words displayed also change to a great extent. However, the narrative that we have tried to drive still holds. There are a lot of negative words (perhaps more negative in this case) and the positive words tend to be more generic.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# testing results without repetition (retweets)
+
+sub_data <- subset(data, !duplicated(data$fixed_text))
+class_words2 <- sub_data %>%
+  unnest_tokens(word, fixed_text) %>%
+  count(class, word, sort = TRUE)
+
+total_words2 <- class_words2 %>% group_by(class) %>% summarize(total = sum(n))
+class_words2 <- left_join(class_words2, total_words2)
+
+
+class_words2 <- class_words2 %>% bind_tf_idf(word, class, n)
+
+class_words2 %>%
+  select(-total) %>%
+  arrange(desc(tf_idf)) %>% head(n=10)
+
+class_words2 %>%
+  group_by(class) %>%
+  slice_max(tf_idf, n = 15) %>%
+  ungroup() %>%
+  ggplot(aes(tf_idf, fct_reorder(word, tf_idf), fill = class)) +
+  geom_col(show.legend = FALSE, col = "black") +
+  facet_wrap(~class, ncol = 2, scales = "free") +
+  labs(x = "tf-idf", y = NULL) + theme_bw() +
+  scale_fill_manual(values = c("red3", "royalblue3")) +
+  theme(legend.position = "none",
+        strip.background = element_rect(colour="black",
+                                        fill="white"))
+
+
+```
+
+
+
+## Analyzing bigrams
+
+Moving on, we analyze the data at a bigram level. Based on the output shown below, we can see common themes reflecting how the amendment of the judgment in this case could lead to an increase on the control of women and instances of domestic violence.
+
+```{r, message=FALSE, warning = FALSE,fig.align='center', fig.width= 7, fig.height= 5, out.height=5, out.width=7}
+class_bigrams <- data %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+bigram_counts <- class_bigrams %>%
+  count(bigram, sort = TRUE)
+
+extra_stopwords <- data_frame(word = c("https", "t.co",'8rtzzsno6k','â','1507','judgeâ','ofâ'))
+
+bigrams_separated <- class_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% extra_stopwords$word) %>%
+  filter(!word2 %in% extra_stopwords$word)
+
+bigrams_filtered <- bigrams_filtered %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# new bigram counts:
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, sort = TRUE)
+
+head(bigram_counts,10) %>% 
+  kbl() %>%
+  kable_classic_2(full_width = F)
+```
+
+Again, as done in the previous section, we remove the retweets and analyze the most frequently occuring bigrams. In this case, we can see that a lot of the frequently occuring two words seem to contain the term 'RoeVWade'. Therefore, we will prefer retaining our retweets in this case and proceed with the visualization.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+class_bigrams2 <- sub_data %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+bigram_counts2 <- class_bigrams2 %>%
+  count(bigram, sort = TRUE)
+
+extra_stopwords <- data_frame(word = c("https", "t.co",'8rtzzsno6k','â','1507','judgeâ','ofâ'))
+
+bigrams_separated2 <- class_bigrams2 %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered2 <- bigrams_separated2 %>%
+  filter(!word1 %in% extra_stopwords$word) %>%
+  filter(!word2 %in% extra_stopwords$word)
+
+bigrams_filtered2 <- bigrams_filtered2 %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# new bigram counts:
+bigram_counts2 <- bigrams_filtered2 %>% 
+  count(word1, word2, sort = TRUE)
+
+head(bigram_counts2,10) %>% 
+  kbl() %>%
+  kable_classic_2(full_width = F)
+```
+
+
+```{r, fig.align='center', fig.width= 7, fig.height= 5}
+bigram_graph <- bigram_counts %>% 
+  select(from = word1, to = word2, n = n) %>% 
+  filter(n > 50) %>% 
+  graph_from_data_frame()
+
+set.seed(2016)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.06, 'inches')) +
+  geom_node_point(color = "red3", size = 4) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+One very detailed cluster is observed on the left, which was expected as it revolves around the term 'overturn'. Apart from that we see less connected smaller clusters (3-4 words) which include words which have come up fairly frequently in our text.
+
+## Topic Modelling
+
+In this final section, we will identify topics for these using the Latent Dirichlet Allocation algorithm. To identify the number of topics to classify our tokenized words, we proceeded with a hit and trial method, experimenting between 3 to 7 topics. In this particular case, it seemed that having 3 topics was most insightful.
+
+
+```{r, message=FALSE, warning=FALSE, fig.align='center', fig.width= 9, fig.height= 5}
+corpus <- Corpus(VectorSource(data$fixed_text))
+corpus <- tm_map(corpus, tolower)
+corpus <- tm_map(corpus, PlainTextDocument)
+corpus <- tm_map(corpus, function(x) iconv(x, "latin1", "ASCII", sub=""))
+corpus <- tm_map(corpus, stripWhitespace)
+corpus <- tm_map(corpus, removeWords, 
+                      stopwords("english"))
+
+dtm <- DocumentTermMatrix(corpus)
+
+rowsum <- apply(dtm, 1, sum)
+
+dtm <- dtm[rowsum > 0, ] 
+
+lda <- LDA(dtm, k = 3, control = list(seed = 1234))
+topics <- tidy(lda, matrix = "beta")
+
+top_terms <- topics %>% 
+  group_by(topic) %>% 
+  top_n(10, beta) %>% 
+  ungroup() %>% 
+  arrange(topic, -beta)
+
+top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE, fill = "red3", col = "black") +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() + theme_bw() +
+  theme(legend.position = "none",
+        strip.background = element_rect(colour="black",
+                                        fill="white"))
+```
+From the visuals above, we can see that the first topic seems to be more about men, and how they will feel empowered by this overturned verdict and how this will lead to more instances of violence and rape. The second topic seems to be concentrated more on women, and this amendment would infringe upon their rights. The third topic seems to be linked more to the legal system and the government.
+
+## Conclusion
+
+We used several NLP techniques to analyze the content of the tweets regarding the potential RoevWade case amendment. At a holistic level, it seems that while there is certainly a lot of negative sentiment and emotion due to this possible amendment, there also seems to be quite a lot of support for it. This was verified not only for entire tweets (using sentimentr), but also for tokenized words and bigrams. It could be that the non-retweeted positive tweets were much lesser. This was somewhat verified where we showed highest tf-idf score words for positive and negative tweets and found that the negative ones had use of stronger language and expressed greater negativity whereas the positive ones were more generic. However, based on the assumption that each retweet reflects exactly what each user feels and wants to communicate, it seems that there is a great polarity in sentiment regarding this issue and that the divide amongst the pro-life and the pro-choice seems stronger than ever. The retweets do have an impact on the results of the analysis, and where the impact was the greatest, we showed output with the retweets and without them as well. In the case of topic modelling, removing the retweets left us with a very small sample and no meaningful topics were obtained.
